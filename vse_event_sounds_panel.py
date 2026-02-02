@@ -209,24 +209,22 @@ def get_all_strips(sed):
     return []
 
 
-def find_first_empty_channel(sed):
-    """Find the first channel that has no strips at all.
+def find_next_available_channel(sed):
+    """Find the next channel above all existing strips.
     
-    Returns the lowest channel number that is completely empty.
+    Returns the channel number one above the highest used channel.
+    This ensures each new import batch starts on a fresh channel
+    and gets a new color.
     """
     all_strips = get_all_strips(sed)
     if not all_strips:
         return 1
     
-    # Get all channels that have strips
-    used_channels = set(s.channel for s in all_strips)
+    # Find the highest channel in use
+    max_channel = max(s.channel for s in all_strips)
     
-    # Find the first empty channel starting from 1
-    channel = 1
-    while channel in used_channels:
-        channel += 1
-    
-    return channel
+    # Return the next channel above all existing strips
+    return max_channel + 1
 
 
 def strips_overlap(strip1, strip2):
@@ -428,7 +426,7 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
         sed = seq_scene.sequence_editor
         
         # Find the first completely empty channel for this import batch
-        base_channel = find_first_empty_channel(sed)
+        base_channel = find_next_available_channel(sed)
         
         # Insert sounds at crossing frames with speed-based volume
         inserted_count = 0
@@ -538,7 +536,7 @@ class VSE_OT_InsertEventSound(Operator):
         sed = scene.sequence_editor
 
         # Find the first completely empty channel for this import batch
-        base_channel = find_first_empty_channel(sed)
+        base_channel = find_next_available_channel(sed)
 
         # Get the current frame as starting point
         current_frame = scene.frame_current
