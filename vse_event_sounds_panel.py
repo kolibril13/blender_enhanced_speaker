@@ -52,14 +52,55 @@ def get_bone_collections(self, context):
     return items
 
 
+SUPPORTED_AUDIO_EXTENSIONS = {'.wav', '.mp3', '.ogg', '.flac', '.aiff', '.aif'}
+
+
+def get_sound_files_from_folder(folder_path):
+    """Get all supported audio files from a folder."""
+    if not folder_path or not os.path.isdir(folder_path):
+        return []
+    
+    sound_files = []
+    for filename in os.listdir(folder_path):
+        ext = os.path.splitext(filename)[1].lower()
+        if ext in SUPPORTED_AUDIO_EXTENSIONS:
+            sound_files.append(filename)
+    
+    return sorted(sound_files)
+
+
+def get_sound_files_enum(self, context):
+    """Return a list of sound files for the enum property."""
+    settings = context.scene.vse_event_sound_settings
+    folder_path = bpy.path.abspath(settings.sound_folder)
+    
+    items = []
+    sound_files = get_sound_files_from_folder(folder_path)
+    
+    if not sound_files:
+        items.append(('NONE', "No sounds found", "Select a folder with audio files", 'ERROR', 0))
+    else:
+        for i, filename in enumerate(sound_files):
+            # Use filename as both identifier and display name
+            items.append((filename, filename, f"Sound file: {filename}", 'SOUND', i))
+    
+    return items
+
+
 class VSE_PG_EventSoundSettings(PropertyGroup):
     """Property group for event sound settings."""
     
-    sound_file: StringProperty(
-        name="Sound File",
-        description="Path to the sound file to insert",
-        subtype='FILE_PATH',
+    sound_folder: StringProperty(
+        name="Sound Folder",
+        description="Path to folder containing sound files",
+        subtype='DIR_PATH',
         default="",
+    )
+    
+    sound_file: EnumProperty(
+        name="Sound File",
+        description="Select a sound file from the folder",
+        items=get_sound_files_enum,
     )
     
     volume_slowest: FloatProperty(
@@ -326,8 +367,14 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
             self.report({'ERROR'}, f"'{armature_name}' is not an armature")
             return {'CANCELLED'}
         
-        # Get the sound file path
-        sound_path = bpy.path.abspath(settings.sound_file)
+        # Get the sound file path from folder + selected file
+        sound_folder = bpy.path.abspath(settings.sound_folder)
+        sound_filename = settings.sound_file
+        
+        if sound_folder and sound_filename and sound_filename != 'NONE':
+            sound_path = os.path.join(sound_folder, sound_filename)
+        else:
+            sound_path = None
         
         # Fall back to default bundled sound if no file selected
         if not sound_path or not os.path.exists(sound_path):
@@ -480,24 +527,19 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
         return {'FINISHED'}
 
 
-class VSE_OT_SelectSoundFile(Operator):
-    """Open file browser to select a sound file"""
-    bl_idname = "vse_event.select_sound_file"
-    bl_label = "Select Sound File"
+class VSE_OT_SelectSoundFolder(Operator):
+    """Open file browser to select a folder containing sound files"""
+    bl_idname = "vse_event.select_sound_folder"
+    bl_label = "Select Sound Folder"
     bl_options = {'REGISTER'}
     
-    filepath: StringProperty(
-        subtype='FILE_PATH',
+    directory: StringProperty(
+        subtype='DIR_PATH',
         default="",
     )
     
-    filter_glob: StringProperty(
-        default="*.wav;*.mp3;*.ogg;*.flac;*.aiff;*.aif",
-        options={'HIDDEN'},
-    )
-    
     def execute(self, context):
-        context.scene.vse_event_sound_settings.sound_file = self.filepath
+        context.scene.vse_event_sound_settings.sound_folder = self.directory
         return {'FINISHED'}
     
     def invoke(self, context, event):
@@ -514,8 +556,14 @@ class VSE_OT_InsertEventSound(Operator):
     def execute(self, context):
         settings = context.scene.vse_event_sound_settings
         
-        # Get the sound file path
-        sound_path = bpy.path.abspath(settings.sound_file)
+        # Get the sound file path from folder + selected file
+        sound_folder = bpy.path.abspath(settings.sound_folder)
+        sound_filename = settings.sound_file
+        
+        if sound_folder and sound_filename and sound_filename != 'NONE':
+            sound_path = os.path.join(sound_folder, sound_filename)
+        else:
+            sound_path = None
         
         # Fall back to default bundled sound if no file selected
         if not sound_path or not os.path.exists(sound_path):
@@ -622,20 +670,29 @@ class VSE_PT_EventSoundsPanel(Panel):
         layout = self.layout
         settings = context.scene.vse_event_sound_settings
         
-        # Sound file selection
-        row = layout.row(align=True)
-        row.label(text="Sound:", icon='SOUND')
-        if settings.sound_file:
-            filename = os.path.basename(settings.sound_file)
-            row.label(text=filename)
-        else:
-            row.label(text="Default")
+        # Sound folder selection
+        col = layout.column(align=True)
+        col.label(text="Sound Folder:", icon='FILE_FOLDER')
         
-        layout.operator(
-            "vse_event.select_sound_file",
-            text="Browse...",
+        row = col.row(align=True)
+        if settings.sound_folder:
+            folder_name = os.path.basename(os.path.normpath(settings.sound_folder))
+            row.label(text=folder_name, icon='CHECKMARK')
+        else:
+            row.label(text="Not selected", icon='ERROR')
+        
+        col.operator(
+            "vse_event.select_sound_folder",
+            text="Select Folder...",
             icon='FILEBROWSER'
         )
+        
+        # Sound file dropdown (only show if folder is selected)
+        if settings.sound_folder:
+            layout.separator()
+            col = layout.column(align=True)
+            col.label(text="Sound File:", icon='SOUND')
+            col.prop(settings, "sound_file", text="")
         
         layout.separator()
         
