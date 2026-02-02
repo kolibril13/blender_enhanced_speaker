@@ -154,6 +154,61 @@ def get_all_strips(sed):
     return []
 
 
+def strips_overlap(strip1, strip2):
+    """Check if two strips overlap in time."""
+    # Get start and end frames for each strip
+    start1 = strip1.frame_final_start if hasattr(strip1, 'frame_final_start') else strip1.frame_start
+    end1 = strip1.frame_final_end if hasattr(strip1, 'frame_final_end') else (strip1.frame_start + 48)
+    start2 = strip2.frame_final_start if hasattr(strip2, 'frame_final_start') else strip2.frame_start
+    end2 = strip2.frame_final_end if hasattr(strip2, 'frame_final_end') else (strip2.frame_start + 48)
+    
+    # Check for overlap (strips overlap if one starts before the other ends)
+    return start1 < end2 and start2 < end1
+
+
+def separate_overlapping_strips(strips, base_channel):
+    """Separate overlapping strips onto different channels.
+    
+    Uses a greedy algorithm: for each strip, find the lowest channel
+    where it doesn't overlap with any already-placed strip.
+    """
+    if not strips:
+        return
+    
+    # Sort strips by their start frame
+    sorted_strips = sorted(strips, key=lambda s: s.frame_final_start if hasattr(s, 'frame_final_start') else s.frame_start)
+    
+    # Track which strips are on which channel
+    # channel_strips[channel] = list of strips on that channel
+    channel_strips = {}
+    
+    for strip in sorted_strips:
+        # Find the lowest channel where this strip fits without overlap
+        test_channel = base_channel
+        while True:
+            if test_channel not in channel_strips:
+                # Empty channel, use it
+                channel_strips[test_channel] = [strip]
+                strip.channel = test_channel
+                break
+            
+            # Check if strip overlaps with any existing strip on this channel
+            has_overlap = False
+            for existing_strip in channel_strips[test_channel]:
+                if strips_overlap(strip, existing_strip):
+                    has_overlap = True
+                    break
+            
+            if not has_overlap:
+                # No overlap, use this channel
+                channel_strips[test_channel].append(strip)
+                strip.channel = test_channel
+                break
+            
+            # Try next channel
+            test_channel += 1
+
+
 class VSE_OT_AddSoundsAtZCrossings(Operator):
     """Scan timeline for bones crossing Z threshold and add sounds at those frames"""
     bl_idname = "vse_event.add_sounds_at_z_crossings"
@@ -297,6 +352,7 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
         
         # Insert sounds at crossing frames
         inserted_count = 0
+        new_strips = []
         for frame in crossing_frames:
             try:
                 strip = add_sound_strip(
@@ -306,9 +362,14 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
                     channel=channel,
                     frame_start=frame
                 )
+                new_strips.append(strip)
                 inserted_count += 1
             except Exception as e:
                 self.report({'WARNING'}, f"Failed to add strip at frame {frame}: {e}")
+        
+        # Separate overlapping strips onto different channels
+        if new_strips:
+            separate_overlapping_strips(new_strips, channel)
         
         self.report({'INFO'}, f"Added {inserted_count} sounds at Z-crossing frames")
         return {'FINISHED'}
