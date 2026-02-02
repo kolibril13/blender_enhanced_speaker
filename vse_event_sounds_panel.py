@@ -17,13 +17,37 @@ from bpy.types import Panel, PropertyGroup, Operator
 from bpy.props import PointerProperty, StringProperty, IntProperty, FloatProperty, BoolProperty, EnumProperty
 
 
-def get_collections(self, context):
-    """Return a list of collections for the enum property."""
+def get_armatures(self, context):
+    """Return a list of armature objects for the enum property."""
     items = []
-    for i, col in enumerate(bpy.data.collections):
-        items.append((col.name, col.name, f"Collection: {col.name}", 'OUTLINER_COLLECTION', i))
+    for i, obj in enumerate(bpy.data.objects):
+        if obj.type == 'ARMATURE':
+            items.append((obj.name, obj.name, f"Armature: {obj.name}", 'ARMATURE_DATA', i))
     if not items:
-        items.append(('NONE', "No Collections", "No collections available", 'ERROR', 0))
+        items.append(('NONE', "No Armatures", "No armatures available", 'ERROR', 0))
+    return items
+
+
+def get_bone_collections(self, context):
+    """Return a list of bone collections for the selected armature."""
+    items = [('ALL', "All Bones", "Monitor all bones in the armature", 'BONE_DATA', 0)]
+    
+    settings = context.scene.vse_event_sound_settings
+    armature_name = settings.z_crossing_armature
+    
+    if armature_name and armature_name != 'NONE' and armature_name in bpy.data.objects:
+        armature_obj = bpy.data.objects[armature_name]
+        if armature_obj.type == 'ARMATURE' and armature_obj.data:
+            armature_data = armature_obj.data
+            # Blender 4.0+ uses collections instead of bone_groups
+            if hasattr(armature_data, 'collections'):
+                for i, bcol in enumerate(armature_data.collections):
+                    items.append((bcol.name, bcol.name, f"Bone Collection: {bcol.name}", 'GROUP_BONE', i + 1))
+            # Fallback for older Blender versions with bone_groups
+            elif hasattr(armature_data, 'bone_groups') and armature_data.bone_groups:
+                for i, bg in enumerate(armature_data.bone_groups):
+                    items.append((bg.name, bg.name, f"Bone Group: {bg.name}", 'GROUP_BONE', i + 1))
+    
     return items
 
 
@@ -60,11 +84,17 @@ class VSE_PG_EventSoundSettings(PropertyGroup):
         default=False,
     )
     
-    # Collection Z-crossing settings
-    z_crossing_collection: EnumProperty(
-        name="Collection",
-        description="Collection to monitor for Z=0 crossings",
-        items=get_collections,
+    # Armature/Bone Collection settings
+    z_crossing_armature: EnumProperty(
+        name="Armature",
+        description="Armature to monitor bone Z-crossings",
+        items=get_armatures,
+    )
+    
+    z_crossing_bone_collection: EnumProperty(
+        name="Bone Collection",
+        description="Bone collection to filter which bones to monitor",
+        items=get_bone_collections,
     )
     
     z_crossing_direction: EnumProperty(
@@ -125,34 +155,60 @@ def get_all_strips(sed):
 
 
 class VSE_OT_AddSoundsAtZCrossings(Operator):
-    """Scan timeline for objects crossing Z=0 and add sounds at those frames"""
+    """Scan timeline for bones crossing Z threshold and add sounds at those frames"""
     bl_idname = "vse_event.add_sounds_at_z_crossings"
     bl_label = "Add Sounds at Z Crossings"
     bl_options = {'REGISTER', 'UNDO'}
     
+    def get_bones_in_collection(self, armature_obj, bone_collection_name):
+        """Get list of bone names that belong to the specified bone collection."""
+        armature_data = armature_obj.data
+        bone_names = []
+        
+        if bone_collection_name == 'ALL':
+            return [bone.name for bone in armature_obj.pose.bones]
+        
+        # Blender 4.0+ uses bone collections
+        if hasattr(armature_data, 'collections'):
+            for bcol in armature_data.collections:
+                if bcol.name == bone_collection_name:
+                    # Get bones assigned to this collection
+                    for bone in armature_data.bones:
+                        if hasattr(bone, 'collections') and bcol in bone.collections.values():
+                            bone_names.append(bone.name)
+                        elif hasattr(bcol, 'bones'):
+                            if bone.name in [b.name for b in bcol.bones]:
+                                bone_names.append(bone.name)
+                    break
+        
+        return bone_names
+    
+    def check_crossing(self, prev_z, world_z, direction, threshold=0.1):
+        """Check if a Z-crossing occurred based on direction setting."""
+        if prev_z is None:
+            return False
+        
+        if direction == 'BOTH':
+            return (prev_z < threshold and world_z >= threshold) or (prev_z > threshold and world_z <= threshold)
+        elif direction == 'UP':
+            return prev_z < threshold and world_z >= threshold
+        elif direction == 'DOWN':
+            return prev_z > threshold and world_z <= threshold
+        return False
+    
     def execute(self, context):
         settings = context.scene.vse_event_sound_settings
-        collection_name = settings.z_crossing_collection
+        armature_name = settings.z_crossing_armature
         direction = settings.z_crossing_direction
         
-        # Check if collection exists
-        if collection_name == 'NONE' or collection_name not in bpy.data.collections:
-            self.report({'ERROR'}, "Please select a valid collection")
+        # Check if armature exists
+        if armature_name == 'NONE' or armature_name not in bpy.data.objects:
+            self.report({'ERROR'}, "Please select a valid armature")
             return {'CANCELLED'}
         
-        collection = bpy.data.collections[collection_name]
-        
-        # Get all objects in the collection (including nested)
-        def get_all_objects_in_collection(col):
-            objects = list(col.objects)
-            for child_col in col.children:
-                objects.extend(get_all_objects_in_collection(child_col))
-            return objects
-        
-        objects = get_all_objects_in_collection(collection)
-        
-        if not objects:
-            self.report({'ERROR'}, f"Collection '{collection_name}' has no objects")
+        armature_obj = bpy.data.objects[armature_name]
+        if armature_obj.type != 'ARMATURE':
+            self.report({'ERROR'}, f"'{armature_name}' is not an armature")
             return {'CANCELLED'}
         
         # Get the sound file path
@@ -173,39 +229,44 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
         # Store current frame to restore later
         original_frame = scene.frame_current
         
+        # Get bones to monitor
+        bone_collection_name = settings.z_crossing_bone_collection
+        bone_names = self.get_bones_in_collection(armature_obj, bone_collection_name)
+        
+        if not bone_names:
+            self.report({'ERROR'}, f"No bones found in bone collection '{bone_collection_name}'")
+            return {'CANCELLED'}
+        
         # Find all Z-crossing frames
         crossing_frames = set()
         
-        for obj in objects:
+        # Track Z positions for each bone
+        for bone_name in bone_names:
             prev_z = None
             
             for frame in range(frame_start, frame_end + 1):
                 scene.frame_set(frame)
                 
-                # Get world-space Z position
-                world_z = obj.matrix_world.translation.z
-                
-                if prev_z is not None:
-                    # Check for crossing
-                    crossed = False
+                # Get pose bone for world-space position
+                if bone_name in armature_obj.pose.bones:
+                    pose_bone = armature_obj.pose.bones[bone_name]
+                    # Get world-space position of bone tail (foot position)
+                    # Using the same method as the reference script
+                    tail_world = armature_obj.matrix_world @ pose_bone.tail
+                    world_z = tail_world.z
                     
-                    if direction == 'BOTH':
-                        crossed = (prev_z < 0 and world_z >= 0) or (prev_z > 0 and world_z <= 0)
-                    elif direction == 'UP':
-                        crossed = prev_z < 0 and world_z >= 0
-                    elif direction == 'DOWN':
-                        crossed = prev_z > 0 and world_z <= 0
-                    
-                    if crossed:
+                    if self.check_crossing(prev_z, world_z, direction):
                         crossing_frames.add(frame)
-                
-                prev_z = world_z
+                    
+                    prev_z = world_z
         
         # Restore original frame
         scene.frame_set(original_frame)
         
+        source_name = f"bones in '{bone_collection_name}'" if bone_collection_name != 'ALL' else "all bones"
+        
         if not crossing_frames:
-            self.report({'WARNING'}, f"No Z=0 crossings found for objects in '{collection_name}'")
+            self.report({'WARNING'}, f"No Z crossings found for {source_name}")
             return {'CANCELLED'}
         
         # Sort frames
@@ -461,20 +522,18 @@ class VSE_PT_ZCrossingPanel(Panel):
         layout = self.layout
         settings = context.scene.vse_event_sound_settings
         
-        # Collection selector - compact
         col = layout.column(align=True)
         
-        row = col.row(align=True)
-        row.label(text="Collection:", icon='OUTLINER_COLLECTION')
-        row = col.row(align=True)
-        row.prop(settings, "z_crossing_collection", text="")
+        # Armature selector
+        col.prop(settings, "z_crossing_armature", text="Armature")
+        
+        # Bone collection selector
+        col.prop(settings, "z_crossing_bone_collection", text="Bones")
         
         col.separator()
         
-        row = col.row(align=True)
-        row.label(text="Direction:", icon='SORT_DESC')
-        row = col.row(align=True)
-        row.prop(settings, "z_crossing_direction", text="")
+        # Direction selector
+        col.prop(settings, "z_crossing_direction", text="Direction")
         
         layout.separator()
         
@@ -487,10 +546,10 @@ class VSE_PT_ZCrossingPanel(Panel):
             icon='ADD'
         )
         
-        # Compact info
+        # Info
         row = layout.row()
         row.alignment = 'CENTER'
-        row.label(text="Scans timeline for Z=0 crossings")
+        row.label(text="Triggers at Z=0.1 crossings")
 
 
 def register():
