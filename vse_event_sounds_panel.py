@@ -183,19 +183,6 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
         
         return bone_names
     
-    def check_crossing(self, prev_z, world_z, direction, threshold=0.1):
-        """Check if a Z-crossing occurred based on direction setting."""
-        if prev_z is None:
-            return False
-        
-        if direction == 'BOTH':
-            return (prev_z < threshold and world_z >= threshold) or (prev_z > threshold and world_z <= threshold)
-        elif direction == 'UP':
-            return prev_z < threshold and world_z >= threshold
-        elif direction == 'DOWN':
-            return prev_z > threshold and world_z <= threshold
-        return False
-    
     def execute(self, context):
         settings = context.scene.vse_event_sound_settings
         armature_name = settings.z_crossing_armature
@@ -237,28 +224,46 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
             self.report({'ERROR'}, f"No bones found in bone collection '{bone_collection_name}'")
             return {'CANCELLED'}
         
+        # Get pose bones references once
+        pose_bones = [armature_obj.pose.bones[name] for name in bone_names if name in armature_obj.pose.bones]
+        
+        if not pose_bones:
+            self.report({'ERROR'}, "No valid pose bones found")
+            return {'CANCELLED'}
+        
         # Find all Z-crossing frames
         crossing_frames = set()
         
-        # Track Z positions for each bone
-        for bone_name in bone_names:
-            prev_z = None
+        # Track previous Z positions for each bone
+        prev_z = {bone.name: None for bone in pose_bones}
+        threshold = 0.1
+        
+        # Single pass through timeline - evaluate all bones at each frame
+        for frame in range(frame_start, frame_end + 1):
+            scene.frame_set(frame)
             
-            for frame in range(frame_start, frame_end + 1):
-                scene.frame_set(frame)
+            # Get world matrix once per frame
+            world_matrix = armature_obj.matrix_world
+            
+            # Check all bones at this frame
+            for pose_bone in pose_bones:
+                tail_world = world_matrix @ pose_bone.tail
+                world_z = tail_world.z
+                bone_prev_z = prev_z[pose_bone.name]
                 
-                # Get pose bone for world-space position
-                if bone_name in armature_obj.pose.bones:
-                    pose_bone = armature_obj.pose.bones[bone_name]
-                    # Get world-space position of bone tail (foot position)
-                    # Using the same method as the reference script
-                    tail_world = armature_obj.matrix_world @ pose_bone.tail
-                    world_z = tail_world.z
+                # Inline crossing check for speed
+                if bone_prev_z is not None:
+                    if direction == 'BOTH':
+                        crossed = (bone_prev_z < threshold and world_z >= threshold) or (bone_prev_z > threshold and world_z <= threshold)
+                    elif direction == 'UP':
+                        crossed = bone_prev_z < threshold and world_z >= threshold
+                    else:  # DOWN
+                        crossed = bone_prev_z > threshold and world_z <= threshold
                     
-                    if self.check_crossing(prev_z, world_z, direction):
+                    if crossed:
                         crossing_frames.add(frame)
-                    
-                    prev_z = world_z
+                
+                prev_z[pose_bone.name] = world_z
         
         # Restore original frame
         scene.frame_set(original_frame)
