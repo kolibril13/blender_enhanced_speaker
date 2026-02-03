@@ -180,6 +180,38 @@ def apply_strip_color_by_channel(strip, channel):
         strip.color_tag = f'COLOR_{tag_index:02d}'
 
 
+def get_bone_color_index(bone_name, bone_color_map):
+    """Get a consistent color index for a bone name.
+    
+    Bones are assigned colors in the order they first appear.
+    Each unique bone gets a different color (cycling through 9 colors).
+    
+    Args:
+        bone_name: The name of the bone
+        bone_color_map: A dict mapping bone names to color indices (modified in place)
+    
+    Returns:
+        Color index (1-9) for use with Blender's COLOR_01 through COLOR_09
+    """
+    if bone_name not in bone_color_map:
+        # Assign next available color index (1-9, cycling)
+        next_index = (len(bone_color_map) % 9) + 1
+        bone_color_map[bone_name] = next_index
+    
+    return bone_color_map[bone_name]
+
+
+def apply_strip_color_by_bone(strip, bone_name, bone_color_map):
+    """Apply a color tag to a strip based on the bone name.
+    
+    Each unique bone gets a consistent color across all its strips.
+    """
+    # Blender 4.0+ uses color_tag (enum) with COLOR_01 through COLOR_09
+    if hasattr(strip, 'color_tag'):
+        tag_index = get_bone_color_index(bone_name, bone_color_map)
+        strip.color_tag = f'COLOR_{tag_index:02d}'
+
+
 def get_random_volume(base_volume, randomness):
     """Calculate a random volume based on randomness factor.
     
@@ -507,6 +539,11 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
         volume_fastest = settings.volume_fastest
         volume_randomness = settings.volume_randomness
         
+        # Track bone colors - each unique bone gets a consistent color
+        bone_color_map = {}
+        # Track which bone each strip belongs to (for reapplying colors after channel separation)
+        strip_bone_map = {}
+        
         for frame in crossing_frames:
             try:
                 # Get the bone name that triggered this crossing
@@ -543,8 +580,11 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
                     frame_start=frame
                 )
                 
-                # Apply color based on the base channel (each import batch gets one color)
-                apply_strip_color_by_channel(strip, base_channel)
+                # Apply color based on the bone name (each bone gets a unique color)
+                apply_strip_color_by_bone(strip, bone_name, bone_color_map)
+                
+                # Track which bone this strip belongs to
+                strip_bone_map[strip] = bone_name
                 
                 # Apply the calculated volume
                 if hasattr(strip, 'volume'):
@@ -558,9 +598,10 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
         # Separate overlapping strips onto different channels (starting from base_channel)
         if new_strips:
             separate_overlapping_strips(new_strips, base_channel)
-            # Apply the same color to all strips (they may have moved to different channels)
+            # Reapply bone-based colors after channel separation (strips may have moved)
             for strip in new_strips:
-                apply_strip_color_by_channel(strip, base_channel)
+                if strip in strip_bone_map:
+                    apply_strip_color_by_bone(strip, strip_bone_map[strip], bone_color_map)
         
         self.report({'INFO'}, f"Added {inserted_count} sounds at Z-crossing frames (channel {base_channel}+)")
         return {'FINISHED'}
