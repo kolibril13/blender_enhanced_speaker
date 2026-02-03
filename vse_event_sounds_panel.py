@@ -428,8 +428,8 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
             self.report({'ERROR'}, "No valid pose bones found")
             return {'CANCELLED'}
         
-        # Find all Z-crossing frames with their crossing speeds
-        # Dict: frame -> max speed at that frame (in case multiple bones cross)
+        # Find all Z-crossing frames with their crossing speeds and bone names
+        # Dict: frame -> (speed, bone_name) - keeps the fastest crossing per frame
         crossing_data = {}
         
         # Track previous Z positions for each bone
@@ -462,8 +462,8 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
                         # Calculate crossing speed (absolute Z delta per frame)
                         crossing_speed = abs(world_z - bone_prev_z)
                         # Keep the maximum speed if multiple bones cross at the same frame
-                        if frame not in crossing_data or crossing_speed > crossing_data[frame]:
-                            crossing_data[frame] = crossing_speed
+                        if frame not in crossing_data or crossing_speed > crossing_data[frame][0]:
+                            crossing_data[frame] = (crossing_speed, pose_bone.name)
                 
                 prev_z[pose_bone.name] = world_z
         
@@ -483,7 +483,7 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
         
         # Sort frames and normalize speeds
         crossing_frames = sorted(crossing_data.keys())
-        speeds = [crossing_data[f] for f in crossing_frames]
+        speeds = [crossing_data[f][0] for f in crossing_frames]  # Extract speed from tuple
         max_speed = max(speeds) if speeds else 1.0
         min_speed = min(speeds) if speeds else 0.0
         speed_range = max_speed - min_speed if max_speed > min_speed else 1.0
@@ -509,6 +509,9 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
         
         for frame in crossing_frames:
             try:
+                # Get the bone name that triggered this crossing
+                crossing_speed, bone_name = crossing_data[frame]
+                
                 # Determine which sound file to use
                 if selection_mode == 'RANDOM' and available_sound_files:
                     current_sound_path = os.path.join(sound_folder, random.choice(available_sound_files))
@@ -517,7 +520,7 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
                 
                 strip = add_sound_strip(
                     sed,
-                    name=f"ZCross_{frame}",
+                    name=f"{bone_name}_{frame}",
                     filepath=current_sound_path,
                     channel=base_channel,
                     frame_start=frame
@@ -527,8 +530,7 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
                 apply_strip_color_by_channel(strip, base_channel)
                 
                 # Calculate speed-based volume (faster crossing = louder)
-                # Normalize speed to 0-1 range
-                crossing_speed = crossing_data[frame]
+                # Normalize speed to 0-1 range (crossing_speed already extracted above)
                 if speed_range > 0:
                     # Normalize: 0 = slowest, 1 = fastest
                     normalized_speed = (crossing_speed - min_speed) / speed_range
