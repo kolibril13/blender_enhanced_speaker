@@ -31,7 +31,10 @@ def get_armatures(self, context):
 
 def get_bone_collections(self, context):
     """Return a list of bone collections for the selected armature."""
-    items = [('ALL', "All Bones", "Monitor all bones in the armature", 'BONE_DATA', 0)]
+    items = [
+        ('ALL', "All Bones", "Monitor all bones in the armature", 'BONE_DATA', 0),
+        ('SELECTED', "Selected Bones", "Monitor only bones currently selected in Pose Mode", 'RESTRICT_SELECT_OFF', 1),
+    ]
     
     settings = context.scene.vse_event_sound_settings
     armature_name = settings.z_crossing_armature
@@ -43,11 +46,11 @@ def get_bone_collections(self, context):
             # Blender 4.0+ uses collections instead of bone_groups
             if hasattr(armature_data, 'collections'):
                 for i, bcol in enumerate(armature_data.collections):
-                    items.append((bcol.name, bcol.name, f"Bone Collection: {bcol.name}", 'GROUP_BONE', i + 1))
+                    items.append((bcol.name, bcol.name, f"Bone Collection: {bcol.name}", 'GROUP_BONE', i + 2))
             # Fallback for older Blender versions with bone_groups
             elif hasattr(armature_data, 'bone_groups') and armature_data.bone_groups:
                 for i, bg in enumerate(armature_data.bone_groups):
-                    items.append((bg.name, bg.name, f"Bone Group: {bg.name}", 'GROUP_BONE', i + 1))
+                    items.append((bg.name, bg.name, f"Bone Group: {bg.name}", 'GROUP_BONE', i + 2))
     
     return items
 
@@ -337,6 +340,18 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
         if bone_collection_name == 'ALL':
             return [bone.name for bone in armature_obj.pose.bones]
         
+        if bone_collection_name == 'SELECTED':
+            # Get currently selected pose bones from context
+            # This works in Pose Mode and returns the selected bones
+            selected_pose_bones = bpy.context.selected_pose_bones
+            if selected_pose_bones:
+                for pose_bone in selected_pose_bones:
+                    # id_data gives us the Armature data block (not the Object)
+                    # Compare with armature_obj.data to check it's the same armature
+                    if pose_bone.id_data.name == armature_data.name:
+                        bone_names.append(pose_bone.name)
+            return bone_names
+        
         # Blender 4.0+ uses bone collections
         if hasattr(armature_data, 'collections'):
             for bcol in armature_data.collections:
@@ -398,7 +413,10 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
         bone_names = self.get_bones_in_collection(armature_obj, bone_collection_name)
         
         if not bone_names:
-            self.report({'ERROR'}, f"No bones found in bone collection '{bone_collection_name}'")
+            if bone_collection_name == 'SELECTED':
+                self.report({'ERROR'}, "No bones selected. Select bones in Pose Mode first.")
+            else:
+                self.report({'ERROR'}, f"No bones found in bone collection '{bone_collection_name}'")
             return {'CANCELLED'}
         
         # Get pose bones references once
@@ -450,7 +468,12 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
         # Restore original frame
         scene.frame_set(original_frame)
         
-        source_name = f"bones in '{bone_collection_name}'" if bone_collection_name != 'ALL' else "all bones"
+        if bone_collection_name == 'ALL':
+            source_name = "all bones"
+        elif bone_collection_name == 'SELECTED':
+            source_name = f"{len(bone_names)} selected bones"
+        else:
+            source_name = f"bones in '{bone_collection_name}'"
         
         if not crossing_data:
             self.report({'WARNING'}, f"No Z crossings found for {source_name}")
