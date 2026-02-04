@@ -166,6 +166,15 @@ class VSE_PG_EventSoundSettings(PropertyGroup):
         ],
         default='BOTH',
     )
+    
+    z_crossing_threshold: FloatProperty(
+        name="Z Threshold",
+        description="Z height at which crossings are detected",
+        default=0.1,
+        soft_min=-10.0,
+        soft_max=10.0,
+        unit='LENGTH',
+    )
 
 
 def apply_strip_color_by_channel(strip, channel):
@@ -466,7 +475,7 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
         
         # Track previous Z positions for each bone
         prev_z = {bone.name: None for bone in pose_bones}
-        threshold = 0.1
+        threshold = settings.z_crossing_threshold
         
         # Single pass through timeline - evaluate all bones at each frame
         for frame in range(frame_start, frame_end + 1):
@@ -714,6 +723,9 @@ class VSE_PT_ZCrossingPanel(Panel):
         # Direction selector
         col.prop(settings, "z_crossing_direction", text="Direction")
         
+        # Z threshold
+        col.prop(settings, "z_crossing_threshold", text="Z Threshold")
+        
         layout.separator()
         
         # Main button
@@ -729,7 +741,6 @@ class VSE_PT_ZCrossingPanel(Panel):
         box = layout.box()
         col = box.column(align=True)
         col.scale_y = 0.8
-        col.label(text="Triggers at Z=0.1 crossings")
         col.label(text="Faster crossings = louder")
 
 
