@@ -2,7 +2,7 @@ schema_version = "1.0.0"
 
 # Blender extension manifest
 id = "motion_sounds"
-version = "0.8.0"
+version = "0.9.0"
 name = "Motion Sounds"
 tagline = "Add sounds to your animation based on motion events"
 maintainer = "Jan-hendrik Müller"
@@ -24,7 +24,7 @@ blender_version_min = "4.2.0"
 # License conforming to https://spdx.org/licenses/ (use "SPDX: prefix)
 # https://docs.blender.org/manual/en/dev/advanced/extensions/licenses.html
 license = [
-  "SPDX:GPL-2.0-or-later",
+  "SPDX:GPL-3.0-or-later",
 ]
 # Optional: required by some licenses.
 # copyright = [
