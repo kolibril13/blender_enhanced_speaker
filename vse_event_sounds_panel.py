@@ -636,6 +636,26 @@ class VSE_OT_SelectSoundFolder(Operator):
         return {'RUNNING_MODAL'}
 
 
+class VSE_OT_UseDefaultSounds(Operator):
+    """Use the bundled CC0-licensed default sound files"""
+    bl_idname = "vse_event.use_default_sounds"
+    bl_label = "Use Default (CC0)"
+    bl_options = {'REGISTER'}
+    
+    def execute(self, context):
+        # Get the path to the bundled sounds folder
+        addon_dir = os.path.dirname(os.path.realpath(__file__))
+        sounds_folder = os.path.join(addon_dir, "sounds")
+        
+        if os.path.isdir(sounds_folder):
+            context.scene.vse_event_sound_settings.sound_folder = sounds_folder
+            self.report({'INFO'}, f"Using default sounds from: {sounds_folder}")
+            return {'FINISHED'}
+        else:
+            self.report({'ERROR'}, "Default sounds folder not found")
+            return {'CANCELLED'}
+
+
 class VSE_PT_MotionSoundsPanel(Panel):
     """Main panel in the N-panel of the 3D Viewport"""
     bl_label = "Motion Sounds"
@@ -659,7 +679,13 @@ class VSE_PT_MotionSoundsPanel(Panel):
         else:
             row.label(text="Not selected", icon='ERROR')
         
-        col.operator(
+        row = col.row(align=True)
+        row.operator(
+            "vse_event.use_default_sounds",
+            text="Use Default (CC0)",
+            icon='PACKAGE'
+        )
+        row.operator(
             "vse_event.select_sound_folder",
             text="Select Folder...",
             icon='FILEBROWSER'
