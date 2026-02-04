@@ -10,7 +10,7 @@ maintainer = "Jan-hendrik Müller"
 type = "add-on"
 
 # Optional link to documentation, support, source files, etc
-# website = "https://extensions.blender.org/add-ons/my-example-package/"
+website = "https://github.com/kolibril13/blender_motion_sounds/issues"
 
 # Optional list defined by Blender and server, see:
 # https://docs.blender.org/manual/en/dev/advanced/extensions/tags.html
