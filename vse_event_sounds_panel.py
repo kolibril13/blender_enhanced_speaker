@@ -13,9 +13,10 @@
 
 import bpy
 import os
+import math
 import random
 from bpy.types import Panel, PropertyGroup, Operator
-from bpy.props import PointerProperty, StringProperty, FloatProperty, EnumProperty
+from bpy.props import PointerProperty, StringProperty, FloatProperty, EnumProperty, BoolProperty
 
 
 def get_armatures(self, context):
@@ -116,8 +117,9 @@ class VSE_PG_EventSoundSettings(PropertyGroup):
         items=get_sound_files_enum,
     )
     
-    volume_slowest: FloatProperty(
-        name="Slowest Volume",
+    # Crossing speed volume settings
+    speed_volume_softer: FloatProperty(
+        name="Softer",
         description="Volume for the slowest Z-crossings",
         default=0.3,
         min=0.0,
@@ -125,8 +127,8 @@ class VSE_PG_EventSoundSettings(PropertyGroup):
         subtype='FACTOR',
     )
     
-    volume_fastest: FloatProperty(
-        name="Fastest Volume",
+    speed_volume_louder: FloatProperty(
+        name="Louder",
         description="Volume for the fastest Z-crossings",
         default=1.0,
         min=0.0,
@@ -134,9 +136,35 @@ class VSE_PG_EventSoundSettings(PropertyGroup):
         subtype='FACTOR',
     )
     
+    # Camera distance volume settings
+    camera_volume_softer: FloatProperty(
+        name="Softer",
+        description="Volume for bones farthest from camera",
+        default=0.3,
+        min=0.0,
+        max=1.0,
+        subtype='FACTOR',
+    )
+    
+    camera_volume_louder: FloatProperty(
+        name="Louder",
+        description="Volume for bones nearest to camera",
+        default=1.0,
+        min=0.0,
+        max=1.0,
+        subtype='FACTOR',
+    )
+    
+    # Randomize volume settings
+    use_volume_randomness: BoolProperty(
+        name="Randomize Volume",
+        description="Add random variation to the final volume",
+        default=True,
+    )
+    
     volume_randomness: FloatProperty(
-        name="Volume Randomness",
-        description="Random variation applied after speed-based volume (0 = no variation, 1 = can reduce to 0)",
+        name="Amount",
+        description="Random variation amount (0 = no variation, 1 = can reduce to 0)",
         default=0.2,
         min=0.0,
         max=1.0,
@@ -174,6 +202,18 @@ class VSE_PG_EventSoundSettings(PropertyGroup):
         soft_min=-10.0,
         soft_max=10.0,
         unit='LENGTH',
+    )
+    
+    use_speed_volume: BoolProperty(
+        name="Crossing Speed → Volume",
+        description="Louder volume for faster Z-crossings",
+        default=True,
+    )
+    
+    use_camera_volume_pan: BoolProperty(
+        name="Camera Distance → Volume & Pan",
+        description="Volume from camera distance and stereo pan from horizontal angle in camera view",
+        default=False,
     )
 
 
@@ -399,6 +439,16 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
         settings = context.scene.vse_event_sound_settings
         armature_name = settings.z_crossing_armature
         direction = settings.z_crossing_direction
+        use_speed = settings.use_speed_volume
+        use_camera = settings.use_camera_volume_pan
+        
+        # Validate camera if camera volume & pan is enabled
+        camera_obj = None
+        if use_camera:
+            camera_obj = context.scene.camera
+            if not camera_obj:
+                self.report({'ERROR'}, "No active camera in scene. Set a camera or disable Camera Distance → Volume & Pan.")
+                return {'CANCELLED'}
         
         # Check if armature exists
         if armature_name == 'NONE' or armature_name not in bpy.data.objects:
@@ -477,6 +527,9 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
         prev_z = {bone.name: None for bone in pose_bones}
         threshold = settings.z_crossing_threshold
         
+        # Store position data for camera-based volume & pan calculations
+        crossing_positions = {}  # frame -> (bone_world_pos, camera_matrix)
+        
         # Single pass through timeline - evaluate all bones at each frame
         for frame in range(frame_start, frame_end + 1):
             scene.frame_set(frame)
@@ -505,6 +558,11 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
                         # Keep the maximum speed if multiple bones cross at the same frame
                         if frame not in crossing_data or crossing_speed > crossing_data[frame][0]:
                             crossing_data[frame] = (crossing_speed, pose_bone.name)
+                            if use_camera:
+                                crossing_positions[frame] = (
+                                    tail_world.copy(),
+                                    camera_obj.matrix_world.copy(),
+                                )
                 
                 prev_z[pose_bone.name] = world_z
         
@@ -529,6 +587,34 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
         min_speed = min(speeds) if speeds else 0.0
         speed_range = max_speed - min_speed if max_speed > min_speed else 1.0
         
+        # Compute camera distance normalization and horizontal FOV for pan
+        if use_camera:
+            distances = []
+            for frame in crossing_frames:
+                bone_pos, cam_matrix = crossing_positions[frame]
+                cam_pos = cam_matrix.translation
+                distance = (bone_pos - cam_pos).length
+                distances.append(distance)
+            max_distance = max(distances) if distances else 1.0
+            min_distance = min(distances) if distances else 0.0
+            distance_range = max_distance - min_distance if max_distance > min_distance else 1.0
+            
+            # Compute horizontal FOV for pan normalization
+            cam_data = camera_obj.data
+            render = context.scene.render
+            aspect_x = render.resolution_x * render.pixel_aspect_x
+            aspect_y = render.resolution_y * render.pixel_aspect_y
+            if cam_data.sensor_fit == 'VERTICAL':
+                h_fov = 2 * math.atan(math.tan(cam_data.angle / 2) * (aspect_x / aspect_y))
+            elif cam_data.sensor_fit == 'HORIZONTAL':
+                h_fov = cam_data.angle
+            else:  # AUTO
+                if aspect_x >= aspect_y:
+                    h_fov = cam_data.angle
+                else:
+                    h_fov = 2 * math.atan(math.tan(cam_data.angle / 2) * (aspect_x / aspect_y))
+            half_fov = h_fov / 2 if h_fov > 0 else math.radians(30)
+        
         # Get the correct scene for the sequencer
         seq_scene = get_sequencer_scene(context)
         
@@ -541,11 +627,10 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
         # Find the first completely empty channel for this import batch
         base_channel = find_next_available_channel(sed)
         
-        # Insert sounds at crossing frames with speed-based volume
+        # Insert sounds at crossing frames
         inserted_count = 0
         new_strips = []
-        volume_slowest = settings.volume_slowest
-        volume_fastest = settings.volume_fastest
+        use_randomness = settings.use_volume_randomness
         volume_randomness = settings.volume_randomness
         
         # Track bone colors - each unique bone gets a consistent color
@@ -564,26 +649,64 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
                 else:
                     current_sound_path = sound_path
                 
-                # Calculate speed-based volume (faster crossing = louder)
-                # Normalize speed to 0-1 range (crossing_speed already extracted above)
-                if speed_range > 0:
-                    # Normalize: 0 = slowest, 1 = fastest
-                    normalized_speed = (crossing_speed - min_speed) / speed_range
+                # Calculate volume from each active effect, then combine
+                pan = 0.0
+                volume = 1.0
+                
+                if use_speed:
+                    # Speed: faster crossing → louder
+                    if speed_range > 0:
+                        speed_factor = (crossing_speed - min_speed) / speed_range
+                    else:
+                        speed_factor = 1.0
+                    speed_vol = settings.speed_volume_softer + speed_factor * (settings.speed_volume_louder - settings.speed_volume_softer)
+                    volume *= speed_vol
+                
+                if use_camera:
+                    # Camera distance: closer → louder
+                    bone_pos, cam_matrix = crossing_positions[frame]
+                    cam_pos = cam_matrix.translation
+                    distance = (bone_pos - cam_pos).length
+                    if distance_range > 0:
+                        camera_factor = 1.0 - (distance - min_distance) / distance_range
+                    else:
+                        camera_factor = 1.0
+                    cam_vol = settings.camera_volume_softer + camera_factor * (settings.camera_volume_louder - settings.camera_volume_softer)
+                    volume *= cam_vol
+                    
+                    # Pan: project bone position into camera's local space
+                    cam_inv = cam_matrix.inverted()
+                    local_pos = cam_inv @ bone_pos
+                    # In camera space: X = right, -Z = forward
+                    depth = -local_pos.z
+                    if depth > 0:
+                        angle = math.atan2(local_pos.x, depth)
+                        pan = max(-1.0, min(1.0, angle / half_fov))
+                    else:
+                        pan = 0.0
+                
+                # Apply random variation (if enabled)
+                if use_randomness:
+                    final_volume = get_random_volume(volume, volume_randomness)
                 else:
-                    normalized_speed = 1.0
+                    final_volume = volume
                 
-                # Map to user-defined volume range
-                base_volume = volume_slowest + (normalized_speed * (volume_fastest - volume_slowest))
-                
-                # Apply random variation
-                final_volume = get_random_volume(base_volume, volume_randomness)
-                
-                # Format volume as percentage for the name (e.g., 0.75 -> 75)
+                # Format name with volume (and pan info when camera is active)
                 volume_percent = int(round(final_volume * 100))
+                if use_camera:
+                    if pan < -0.01:
+                        pan_str = f"L{int(abs(pan) * 100)}"
+                    elif pan > 0.01:
+                        pan_str = f"R{int(abs(pan) * 100)}"
+                    else:
+                        pan_str = "C"
+                    strip_display_name = f"{bone_name}_v{volume_percent}_{pan_str}"
+                else:
+                    strip_display_name = f"{bone_name}_v{volume_percent}"
                 
                 strip = add_sound_strip(
                     sed,
-                    name=f"{bone_name}_volume{volume_percent}",
+                    name=strip_display_name,
                     filepath=current_sound_path,
                     channel=base_channel,
                     frame_start=frame
@@ -595,9 +718,11 @@ class VSE_OT_AddSoundsAtZCrossings(Operator):
                 # Track which bone this strip belongs to
                 strip_bone_map[strip] = bone_name
                 
-                # Apply the calculated volume
+                # Apply the calculated volume and pan
                 if hasattr(strip, 'volume'):
                     strip.volume = final_volume
+                if use_camera and hasattr(strip, 'pan'):
+                    strip.pan = pan
                 
                 new_strips.append(strip)
                 inserted_count += 1
@@ -722,38 +847,79 @@ class VSE_PT_MotionSoundsPanel(Panel):
                 folder_path = bpy.path.abspath(settings.sound_folder)
                 sound_count = len(get_sound_files_from_folder(folder_path))
                 col.label(text=f"Will use {sound_count} sound(s) randomly", icon='INFO')
-        
-        layout.separator()
-        
-        # Volume settings
-        col = layout.column(align=True)
-        col.label(text="Volume (Speed-Based):", icon='SPEAKER')
-        col.prop(settings, "volume_slowest", text="Slowest", slider=True)
-        col.prop(settings, "volume_fastest", text="Fastest", slider=True)
-        
-        col.separator()
-        col.prop(settings, "volume_randomness", text="Volume Randomness", slider=True)
 
 
-class VSE_PT_RenderAudioPanel(Panel):
-    """Sub-panel with a Render Audio button"""
-    bl_label = "Render Audio"
-    bl_idname = "VSE_PT_render_audio_panel"
+class VSE_PT_SpeedVolumePanel(Panel):
+    """Sub-panel to enable crossing-speed based volume"""
+    bl_label = "Crossing Speed → Volume"
+    bl_idname = "VSE_PT_speed_volume_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Motion Sounds"
     bl_parent_id = "VSE_PT_motion_sounds_panel"
-    bl_options = {'DEFAULT_CLOSED'}
+    bl_order = 1
+
+    def draw_header(self, context):
+        settings = context.scene.vse_event_sound_settings
+        self.layout.prop(settings, "use_speed_volume", text="")
 
     def draw(self, context):
         layout = self.layout
-        row = layout.row(align=True)
-        row.scale_y = 1.3
-        row.operator(
-            VSE_OT_RenderAudio.bl_idname,
-            text="Render Audio",
-            icon='FILE_SOUND'
-        )
+        settings = context.scene.vse_event_sound_settings
+        layout.active = settings.use_speed_volume
+
+        col = layout.column(align=True)
+        col.prop(settings, "speed_volume_softer", text="Softer (slowest)", slider=True)
+        col.prop(settings, "speed_volume_louder", text="Louder (fastest)", slider=True)
+
+
+class VSE_PT_CameraVolumePanPanel(Panel):
+    """Sub-panel to enable camera-distance based volume and stereo pan"""
+    bl_label = "Camera Distance → Volume & Pan"
+    bl_idname = "VSE_PT_camera_volume_pan_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Motion Sounds"
+    bl_parent_id = "VSE_PT_motion_sounds_panel"
+    bl_order = 2
+
+    def draw_header(self, context):
+        settings = context.scene.vse_event_sound_settings
+        self.layout.prop(settings, "use_camera_volume_pan", text="")
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.vse_event_sound_settings
+        layout.active = settings.use_camera_volume_pan
+
+        col = layout.column(align=True)
+        col.prop(settings, "camera_volume_softer", text="Softer (farthest)", slider=True)
+        col.prop(settings, "camera_volume_louder", text="Louder (nearest)", slider=True)
+        col.separator()
+        col.label(text="Pan follows camera angle", icon='INFO')
+
+
+class VSE_PT_RandomizeVolumePanel(Panel):
+    """Sub-panel to enable random volume variation"""
+    bl_label = "Randomize Volume"
+    bl_idname = "VSE_PT_randomize_volume_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Motion Sounds"
+    bl_parent_id = "VSE_PT_motion_sounds_panel"
+    bl_order = 3
+
+    def draw_header(self, context):
+        settings = context.scene.vse_event_sound_settings
+        self.layout.prop(settings, "use_volume_randomness", text="")
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.vse_event_sound_settings
+        layout.active = settings.use_volume_randomness
+
+        col = layout.column(align=True)
+        col.prop(settings, "volume_randomness", text="Amount", slider=True)
 
 
 class VSE_PT_ZCrossingPanel(Panel):
@@ -764,6 +930,7 @@ class VSE_PT_ZCrossingPanel(Panel):
     bl_region_type = 'UI'
     bl_category = "Motion Sounds"
     bl_parent_id = "VSE_PT_motion_sounds_panel"
+    bl_order = 4
 
     def draw(self, context):
         layout = self.layout
@@ -795,12 +962,28 @@ class VSE_PT_ZCrossingPanel(Panel):
             text="Add Sounds at Crossings",
             icon='ADD'
         )
-        
-        # Info
-        box = layout.box()
-        col = box.column(align=True)
-        col.scale_y = 0.8
-        col.label(text="Faster crossings = louder")
+
+
+class VSE_PT_RenderAudioPanel(Panel):
+    """Sub-panel with a Render Audio button"""
+    bl_label = "Render Audio"
+    bl_idname = "VSE_PT_render_audio_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Motion Sounds"
+    bl_parent_id = "VSE_PT_motion_sounds_panel"
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_order = 5
+
+    def draw(self, context):
+        layout = self.layout
+        row = layout.row(align=True)
+        row.scale_y = 1.3
+        row.operator(
+            VSE_OT_RenderAudio.bl_idname,
+            text="Render Audio",
+            icon='FILE_SOUND'
+        )
 
 
 def register():
